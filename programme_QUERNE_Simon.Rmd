@@ -1,0 +1,241 @@
+---
+title: "Programme Econometrie"
+author: "QUERNE Simon"
+date: "05/04/2022"
+output: html_document
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# I - Travail préliminaire
+## Importation des données
+```{r}
+library(reshape2)
+library(psych)
+
+pays = read.csv("comtrade.csv")
+pays = unique(pays[, c("Reporter", "Reporter.ISO")])
+names(pays) = c("PAYS", "LOCATION")
+file.names = list.files()
+donnees = read.csv("data/donnees_QUERNE_Simon.csv")
+```
+
+
+## Création de X
+```{r}
+donnees.val = donnees[, c("LOCATION", "INDICATOR", "TIME", "Value")]
+donnees.est = donnees[, c("LOCATION", "TIME", "est")]
+donnees.mat = dcast(LOCATION + TIME ~ INDICATOR, # projette le tableau
+                    data = donnees.val,
+                    fun.aggregate = sum,
+                    na.rm = TRUE)
+donnees.mat[donnees.mat == 0] = NA
+donnees.mat = merge(donnees.mat, donnees.est, c("LOCATION", "TIME"))
+donnees.mat = unique(donnees.mat)
+```
+
+## Coupe
+```{r}
+t = 2012 # choix de l'année
+donnees.t = donnees.mat[donnees.mat$TIME == t, -2]
+
+idx  = sapply(donnees.t, function(x) sum(!is.na(x)) > 30) # on ne garde que les variables ayant plus de 30 observations
+donnees.t = donnees.t[, idx]
+
+idx  = which(names(donnees.t) == "DEATHCANCER")
+donnees.t = donnees.t[, c(names(donnees.t)[1], "DEATHCANCER", names(donnees.t)[-c(1, idx)])] # on notre tableau dans l'ordre
+```
+
+# II - Traitements
+## Corrélation
+```{r}
+correlation.test = corr.test(donnees.t[-1], method="spearman")
+
+correlation.test$r[upper.tri(correlation.test$r)] = NA
+correlation.test$p[upper.tri(correlation.test$r)] = NA
+
+r.df = as.data.frame(as.table(correlation.test$r))
+p.df = as.data.frame(as.table(correlation.test$p))
+
+r.df = r.df[!is.na(r.df$Freq),]
+p.df = p.df[!is.na(p.df$Freq),]
+
+r.df = r.df[r.df$Freq < 1,]
+r.df = merge(r.df, p.df, c("Var1", "Var2"))
+colnames(r.df) = c("i", "j", "corr", "p-value")
+
+r.df
+```
+
+## Description
+```{r}
+# Ci-dessous la méthode de création des nuages de points du rapport
+donnees.mat$DAILY2 = donnees.mat$DAILY ** 2
+donnees.mat$DAILY3 = donnees.mat$DAILY ** 3
+donnees.mat$DAILY4 = donnees.mat$DAILY ** 4
+
+poly.reg = summary(lm(log(DEATHCANCER) ~ DAILY +
+                        DAILY2 +
+                        # DAILY3 +
+                        # DAILY4 +
+                        1,
+                      data = donnees.mat))
+
+x = seq(min(donnees.mat$DAILY, na.rm = TRUE), max(donnees.mat$DAILY, na.rm = TRUE), length.out = 500)
+y = poly.reg$coefficients[1] +
+  poly.reg$coefficients[2] * x +
+  poly.reg$coefficients[3] * x ** 2 +
+  # poly.reg$coefficients[4] * x ** 3 +
+  # poly.reg$coefficients[5] * x ** 4 +
+  0
+
+plot(log(donnees.mat$DEATHCANCER) ~ donnees.mat$DAILY,
+     pch = 19,
+     col = "#00000044",
+     main = "Morts du cancer en fonction de la part de fumeurs",
+     xlab = "Part de fumeurs quotidiens dans la population",
+     ylab = "Morts du cancer pour 100 000 habitants (log)"
+)
+
+lines(x, y, col="red", lwd = 2)
+
+legend("bottomright",
+       legend = "Courbe de régression quadratique",
+       col = "red",
+       lwd = 2,
+       lty = 1)
+```
+
+
+```{r}
+description.names = c("len",
+              "mean",
+              "sd",
+              "min",
+              "Q1",
+              "Me",
+              "Q3",
+              "max")
+
+donnees.split = split(donnees.mat, donnees.mat$est)
+stats.split = lapply(donnees.split,
+                     function(d){
+                       sapply(d[,names(d) %in% num.names],
+                              function(x){
+                                v = c(length(x[!is.na(x)]),
+                                      mean(x, na.rm=TRUE),
+                                      sd(x, na.rm=TRUE),
+                                      quantile(x, seq(0, 1, .25), na.rm=TRUE))
+                                names(v) = description.names
+                                return(v)
+                              })
+                     })
+
+stats.split = lapply(stats.split, t) # on transpose les résultats pour pouvoir en faire des dataframes
+stats.split = lapply(stats.split, data.frame)
+stats.split$Diff = Reduce(function(db1, db2) db2 / db1, stats.split) # on crée un troisième dataframe pour avoir le rapport des statistiques entre est et non-est
+
+desc.tab = Reduce(function(d1, d2){
+  cbind(d1, d2)
+},
+lapply(stats.split,
+       function(d) d[, c("len", "Me")]))
+names(desc.tab) = paste(names(desc.tab), rep(names(stats.split), each=2), sep=".")
+desc.tab = desc.tab[-5]
+
+donnees.split = split(donnees.mat, donnees.mat$est)
+num.names = names(donnees.mat)[sapply(donnees.mat, is.numeric)]
+mediane.test = Reduce(x = donnees.split, # on fait le test de Wilcoxon-Mann-Whitney sur chaque variable
+                 f = function(d1, d2){
+                   sapply(num.names,
+                          function(variable){
+                            wilcox.test(d1[[variable]],
+                                        d2[[variable]])$p.value
+                          })
+                 })
+
+names(mediane.test) = num.names
+mediane.df = data.frame(mediane.test)
+mediane.df = merge(desc.tab, mediane.df, "row.names")
+mediane.df
+
+```
+
+
+## Sélection des données pour la régression
+```{r}
+donnees.p = donnees.t
+sapply(donnees.t, function(x) sum(!is.na(x)))
+donnees.p=donnees.p[!is.na(donnees.p$DEATHCANCER),
+          c("LOCATION",
+            "DEATHCANCER",
+            "ALCOHOL",
+            "DAILY",
+            "est",
+            "GDP",
+            "HOSPITALBED")]
+
+na.rows = apply(donnees.p[-c(1, 2)], 1, function(row) sum(is.na(row)) > 0)
+length(na.rows) - sum(na.rows)
+donnees.p = donnees.p[!na.rows,]
+
+# création des variables d'intéractions et des variables polynomiales
+donnees.p$DAILY2 = donnees.p$DAILY ** 2
+donnees.p$GDP2 = donnees.p$GDP ** 2
+
+donnees.p$estGDP = donnees.p$est * donnees.p$GDP
+donnees.p$estGDP2 = donnees.p$est * donnees.p$GDP2
+
+donnees.p$estHOSPITALBED = donnees.p$est * log(donnees.p$HOSPITALBED)
+donnees.p$log_estALCOHOL = donnees.p$est * log(donnees.p$ALCOHOL)
+
+donnees.p$estDAILY = donnees.p$est * donnees.p$DAILY
+donnees.p$estDAILY2 = donnees.p$est * donnees.p$DAILY2
+```
+## Régression
+### Régression avec toutes les variables
+```{r}
+reg.dai = lm(log(DEATHCANCER)~
+               est+
+               log(ALCOHOL)+
+               DAILY+
+               DAILY2+
+               log(HOSPITALBED)+
+               GDP+
+               GDP2+
+               1,
+             data = donnees.p)
+
+reg.est = lm(log(DEATHCANCER)~
+               est+
+               log(ALCOHOL)+
+               log_estALCOHOL+
+               DAILY+
+               DAILY2+
+               estDAILY+
+               estDAILY2+
+               log(HOSPITALBED)+
+               estHOSPITALBED+
+               GDP+
+               GDP2+
+               estGDP+
+               estGDP2+
+               1,
+             data = donnees.p)
+
+anova(reg.est, reg.dai)
+
+reg.ifs = lm(log(DEATHCANCER)~
+               # est+
+               log(HOSPITALBED)+
+               GDP+
+               GDP2,
+             data = donnees.p)
+
+anova(reg.ifs, reg.dai, test = "F")
+
+summary(reg.dai)
+shapiro.test(reg.dai$residuals)
+```
