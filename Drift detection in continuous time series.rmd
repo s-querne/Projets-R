@@ -1,0 +1,125 @@
+---
+title: "Drift detection in continuous time series"
+author: "QUERNE Simon"
+date: '2023-12-14'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+n = 100
+n_ann = 5
+N = n*n_ann
+
+x = rnorm(N, 500, 40) # Génère les valeurs
+S = n_ann*365 # Nombre d'emplacements
+s_i = sort(sample(S, N, replace=TRUE)) # Attribue les valeurs aux emplacements
+t_ano = seq(N/2, N/2 + N/5)
+x[t_ano] = x[t_ano] + 50 # Crée l'anomalie
+plot(s_i, x, ylim=c(0, max(x)*1.1), pch=20, col='#00000088')
+abline(v=c(s_i[t_ano[1]], s_i[tail(t_ano, 1)]), lty=2, col='red')
+```
+
+```{r}
+Like = function(vect, loc, bandwidth) {
+  X = sum(vect)
+  N = length(vect)
+  mu = X/N
+  sig2 = var(vect)
+  
+  s_vect = unique(loc)
+  s_list = tapply(vect, loc, function(x) x) # Regroupe les valeurs par emplacement
+  
+  LLR = sapply(
+    s_vect,
+    function(s) {
+      in_window = which(abs(s - s_vect) <= bandwidth)
+      z = s_list[in_window]
+      out = s_list[-in_window]
+      
+      x_z = Reduce('+', lapply(z, sum)) # Somme les valeurs sur la fenêtre
+      n_z = Reduce('+', lapply(z, length)) # Compte les valeurs sur la fenêtre
+      mu_z = x_z/n_z
+      la_z = (X - x_z)/(N - n_z)
+      
+      sig_in = sum(unlist(z)^2) - 2*x_z*mu_z + n_z*mu_z^2 # Variance sur la fenêtre
+      sig_out = sum(unlist(out)^2) - 2*(X-x_z)*la_z + (N-n_z)*la_z^2 # Hors de la fenêtre
+      sig2_z = (sig_in + sig_out)/N # Variance commune du modèle avec anomalie
+      
+      LLR_z = N*log(sqrt(sig2)) + sum((vect - mu)^2)/(2*sig2) - N/2 - N*log(sqrt(sig2_z))
+      
+      return(LLR_z)
+    }
+  )
+  
+  max_idx = which.max(LLR)
+  max_loc = s_vect[max_idx]
+  T_stat = LLR[max_idx]
+  return(list('T_stat'=T_stat, 'max_loc'=max_loc))
+}
+
+shuffle_Like = function(vect, loc, bandwidth, M=100){
+  T_1 = Like(vect, loc, bandwidth)
+  T_M = lapply(1:M, function(m) Like(vect, sample(loc, length(loc)), bandwidth))
+  all_T = sapply(T_M, function(l) l$T_stat)
+  R = rank(c(T_1$T_stat, all_T))[1]
+  T_1[['R']] = R
+  T_1[['p-value']] = R/(M+1)
+  return(T_1)
+}
+```
+
+
+```{r}
+h = S/(4*1:3)
+#sapply(h, function(h0) Like(x, s, bandwidth=h0))
+listlist = sapply(h, function(h0) shuffle_Like(x, s_i, h0, 100))
+```
+
+```{r}
+j = which.max(listlist['T_stat',])
+h0 = h[j]
+cluster_center = listlist[, j][['max_loc']]
+in_cluster = abs(s_i - cluster_center) <= h0
+
+x_in = x[in_cluster]
+s_in = s_i[in_cluster]
+
+x_out = x[!in_cluster]
+s_out = s_i[!in_cluster]
+
+mu_in = mean(x_in)
+mu_out = mean(x_out)
+
+plot(
+  s_in,
+  x_in,
+  xlim=quantile(s_i, 0:1),
+  ylim=c(0, max(x)*1.1),
+  pch=20,
+  col='#FF000044',
+  main='Application aux données test',
+  sub=paste('Taille de fenêtre', h0, sep=': '),
+  xlab='Emplacements',
+  ylab='Valeurs'
+)
+
+points(
+  s_out,
+  x_out,
+  pch=20,
+  col='#00000044'
+)
+
+abline(v=c(s_i[t_ano[1]], s_i[tail(t_ano, 1)]), lty=2, col='red', lwd=1)
+
+cluster_start = s_i[which(in_cluster)[1]]
+cluster_end = s_i[tail(which(in_cluster), 1)]
+
+segments(x0=c(1, cluster_end), x1=c(cluster_start, tail(s_i, 1)), y0=mu_out, col='black', lty=1)
+segments(x0=cluster_start, x1=cluster_end, y0=mu_in, col='red', lty=1)
+```
+
